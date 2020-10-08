@@ -355,6 +355,7 @@ struct ingress_policer {
 
 enum dpdk_hw_ol_features {
     NETDEV_RX_CHECKSUM_OFFLOAD = 1 << 0,
+    NETDEV_RX_HW_CRC_STRIP = 1 << 1,
 };
 
 /*
@@ -380,6 +381,8 @@ struct netdev_dpdk {
 
         /* If true, device was attached by rte_eth_dev_attach(). */
         bool attached;
+        /* If true, rte_eth_dev_start() was successfully called */
+        bool started;
         struct eth_addr hwaddr;
         int mtu;
         int socket_id;
@@ -598,19 +601,20 @@ dpdk_mp_create(int socket_id, int mtu)
 static int
 dpdk_mp_full(const struct rte_mempool *mp) OVS_REQUIRES(dpdk_mp_mutex)
 {
-    unsigned ring_count;
-    /* This logic is needed because rte_mempool_full() is not guaranteed to
-     * be atomic and mbufs could be moved from mempool cache --> mempool ring
-     * during the call. However, as no mbufs will be taken from the mempool
-     * at this time, we can work around it by also checking the ring entries
-     * separately and ensuring that they have not changed.
+    /* At this point we want to know if all the mbufs are back
+     * in the mempool. rte_mempool_full() is not atomic but it's
+     * the best available and as we are no longer requesting mbufs
+     * from the mempool, it means mbufs will not move from
+     * 'mempool ring' --> 'mempool cache'. In rte_mempool_full()
+     * the ring is counted before caches, so we won't get false
+     * positives in this use case and we handle false negatives.
+     *
+     * If future implementations of rte_mempool_full() were to change
+     * it could be possible for a false positive. Even that would
+     * likely be ok, as there are additional checks during mempool
+     * freeing but it would make things racey.
      */
-    ring_count = rte_mempool_ops_get_count(mp);
-    if (rte_mempool_full(mp) && rte_mempool_ops_get_count(mp) == ring_count) {
-        return 1;
-    }
-
-    return 0;
+    return rte_mempool_full(mp);
 }
 
 /* Free unused mempools. */
@@ -757,6 +761,7 @@ dpdk_eth_dev_port_config(struct netdev_dpdk *dev, int n_rxq, int n_txq)
     int i;
     struct rte_eth_conf conf = port_conf;
     struct rte_eth_dev_info info;
+    uint16_t conf_mtu;
 
     /* As of DPDK 17.11.1 a few PMDs require to explicitly enable
      * scatter to support jumbo RX. Checking the offload capabilities
@@ -766,7 +771,7 @@ dpdk_eth_dev_port_config(struct netdev_dpdk *dev, int n_rxq, int n_txq)
      * than highlighting the one known not to need scatter */
     if (dev->mtu > ETHER_MTU) {
         rte_eth_dev_info_get(dev->port_id, &info);
-        if (strncmp(info.driver_name, "net_nfp", 6)) {
+        if (strncmp(info.driver_name, "net_nfp", 7)) {
             conf.rxmode.enable_scatter = 1;
         }
     }
@@ -774,6 +779,11 @@ dpdk_eth_dev_port_config(struct netdev_dpdk *dev, int n_rxq, int n_txq)
     conf.intr_conf.lsc = dev->lsc_interrupt_mode;
     conf.rxmode.hw_ip_checksum = (dev->hw_ol_features &
                                   NETDEV_RX_CHECKSUM_OFFLOAD) != 0;
+
+    if (dev->hw_ol_features & NETDEV_RX_HW_CRC_STRIP) {
+        conf.rxmode.hw_strip_crc = 1;
+    }
+
     /* A device may report more queues than it makes available (this has
      * been observed for Intel xl710, which reserves some of them for
      * SRIOV):  rte_eth_*_queue_setup will fail if a queue is not
@@ -793,9 +803,19 @@ dpdk_eth_dev_port_config(struct netdev_dpdk *dev, int n_rxq, int n_txq)
 
         diag = rte_eth_dev_set_mtu(dev->port_id, dev->mtu);
         if (diag) {
-            VLOG_ERR("Interface %s MTU (%d) setup error: %s",
-                    dev->up.name, dev->mtu, rte_strerror(-diag));
-            break;
+            /* A device may not support rte_eth_dev_set_mtu, in this case
+             * flag a warning to the user and include the devices configured
+             * MTU value that will be used instead. */
+            if (-ENOTSUP == diag) {
+                rte_eth_dev_get_mtu(dev->port_id, &conf_mtu);
+                VLOG_WARN("Interface %s does not support MTU configuration, "
+                          "max packet size supported is %"PRIu16".",
+                          dev->up.name, conf_mtu);
+            } else {
+                VLOG_ERR("Interface %s MTU (%d) setup error: %s",
+                         dev->up.name, dev->mtu, rte_strerror(-diag));
+                break;
+            }
         }
 
         for (i = 0; i < n_txq; i++) {
@@ -864,6 +884,13 @@ dpdk_eth_dev_init(struct netdev_dpdk *dev)
 
     rte_eth_dev_info_get(dev->port_id, &info);
 
+    if (strstr(info.driver_name, "vf") != NULL) {
+        VLOG_INFO("Virtual function detected, HW_CRC_STRIP will be enabled");
+        dev->hw_ol_features |= NETDEV_RX_HW_CRC_STRIP;
+    } else {
+        dev->hw_ol_features &= ~NETDEV_RX_HW_CRC_STRIP;
+    }
+
     if ((info.rx_offload_capa & rx_chksm_offload_capa) !=
             rx_chksm_offload_capa) {
         VLOG_WARN("Rx checksum offload is not supported on port "
@@ -892,6 +919,7 @@ dpdk_eth_dev_init(struct netdev_dpdk *dev)
                  rte_strerror(-diag));
         return -diag;
     }
+    dev->started = true;
 
     rte_eth_promiscuous_enable(dev->port_id);
     rte_eth_allmulticast_enable(dev->port_id);
@@ -906,14 +934,6 @@ dpdk_eth_dev_init(struct netdev_dpdk *dev)
 
     mbp_priv = rte_mempool_get_priv(dev->dpdk_mp->mp);
     dev->buf_size = mbp_priv->mbuf_data_room_size - RTE_PKTMBUF_HEADROOM;
-
-    /* Get the Flow control configuration for DPDK-ETH */
-    diag = rte_eth_dev_flow_ctrl_get(dev->port_id, &dev->fc_conf);
-    if (diag) {
-        VLOG_DBG("cannot get flow control parameters on port "DPDK_PORT_ID_FMT
-                 ", err=%d", dev->port_id, diag);
-    }
-
     return 0;
 }
 
@@ -1175,6 +1195,7 @@ netdev_dpdk_destruct(struct netdev *netdev)
     ovs_mutex_lock(&dpdk_mutex);
 
     rte_eth_dev_stop(dev->port_id);
+    dev->started = false;
 
     if (dev->attached) {
         rte_eth_dev_close(dev->port_id);
@@ -1526,6 +1547,7 @@ netdev_dpdk_set_config(struct netdev *netdev, const struct smap *args,
 {
     struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
     bool rx_fc_en, tx_fc_en, autoneg, lsc_interrupt_mode;
+    bool flow_control_requested = true;
     enum rte_eth_fc_mode fc_mode;
     static const enum rte_eth_fc_mode fc_mode_set[2][2] = {
         {RTE_FC_NONE,     RTE_FC_TX_PAUSE},
@@ -1548,7 +1570,7 @@ netdev_dpdk_set_config(struct netdev *netdev, const struct smap *args,
 
     new_devargs = smap_get(args, "dpdk-devargs");
 
-    if (dev->devargs && strcmp(new_devargs, dev->devargs)) {
+    if (dev->devargs && new_devargs && strcmp(new_devargs, dev->devargs)) {
         /* The user requested a new device.  If we return error, the caller
          * will delete this netdev and try to recreate it. */
         err = EAGAIN;
@@ -1613,6 +1635,31 @@ netdev_dpdk_set_config(struct netdev *netdev, const struct smap *args,
     autoneg = smap_get_bool(args, "flow-ctrl-autoneg", false);
 
     fc_mode = fc_mode_set[tx_fc_en][rx_fc_en];
+
+    if (!smap_get(args, "rx-flow-ctrl") && !smap_get(args, "tx-flow-ctrl")
+        && !smap_get(args, "flow-ctrl-autoneg")) {
+        /* FIXME: User didn't ask for flow control configuration.
+         *        For now we'll not print a warning if flow control is not
+         *        supported by the DPDK port. */
+        flow_control_requested = false;
+    }
+
+    /* Get the Flow control configuration. */
+    err = -rte_eth_dev_flow_ctrl_get(dev->port_id, &dev->fc_conf);
+    if (err) {
+        if (err == ENOTSUP) {
+            if (flow_control_requested) {
+                VLOG_WARN("%s: Flow control is not supported.",
+                          netdev_get_name(netdev));
+            }
+            err = 0; /* Not fatal. */
+        } else {
+            VLOG_WARN("%s: Cannot get flow control parameters: %s",
+                      netdev_get_name(netdev), rte_strerror(err));
+        }
+        goto out;
+    }
+
     if (dev->fc_conf.mode != fc_mode || autoneg != dev->fc_conf.autoneg) {
         dev->fc_conf.mode = fc_mode;
         dev->fc_conf.autoneg = autoneg;
@@ -2078,7 +2125,7 @@ __netdev_dpdk_vhost_send(struct netdev *netdev, int qid,
             /* No packets sent - do not retry.*/
             break;
         }
-    } while (cnt && (retries++ <= VHOST_ENQ_RETRY_NUM));
+    } while (cnt && (retries++ < VHOST_ENQ_RETRY_NUM));
 
     rte_spinlock_unlock(&dev->tx_q[qid].tx_lock);
 
@@ -2531,40 +2578,57 @@ netdev_dpdk_get_features(const struct netdev *netdev,
 {
     struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
     struct rte_eth_link link;
+    uint32_t feature = 0;
 
     ovs_mutex_lock(&dev->mutex);
     link = dev->link;
     ovs_mutex_unlock(&dev->mutex);
 
-    if (link.link_duplex == ETH_LINK_HALF_DUPLEX) {
-        if (link.link_speed == ETH_SPEED_NUM_10M) {
-            *current = NETDEV_F_10MB_HD;
+    /* Match against OpenFlow defined link speed values. */
+    if (link.link_duplex == ETH_LINK_FULL_DUPLEX) {
+        switch (link.link_speed) {
+        case ETH_SPEED_NUM_10M:
+            feature |= NETDEV_F_10MB_FD;
+            break;
+        case ETH_SPEED_NUM_100M:
+            feature |= NETDEV_F_100MB_FD;
+            break;
+        case ETH_SPEED_NUM_1G:
+            feature |= NETDEV_F_1GB_FD;
+            break;
+        case ETH_SPEED_NUM_10G:
+            feature |= NETDEV_F_10GB_FD;
+            break;
+        case ETH_SPEED_NUM_40G:
+            feature |= NETDEV_F_40GB_FD;
+            break;
+        case ETH_SPEED_NUM_100G:
+            feature |= NETDEV_F_100GB_FD;
+            break;
+        default:
+            feature |= NETDEV_F_OTHER;
         }
-        if (link.link_speed == ETH_SPEED_NUM_100M) {
-            *current = NETDEV_F_100MB_HD;
-        }
-        if (link.link_speed == ETH_SPEED_NUM_1G) {
-            *current = NETDEV_F_1GB_HD;
-        }
-    } else if (link.link_duplex == ETH_LINK_FULL_DUPLEX) {
-        if (link.link_speed == ETH_SPEED_NUM_10M) {
-            *current = NETDEV_F_10MB_FD;
-        }
-        if (link.link_speed == ETH_SPEED_NUM_100M) {
-            *current = NETDEV_F_100MB_FD;
-        }
-        if (link.link_speed == ETH_SPEED_NUM_1G) {
-            *current = NETDEV_F_1GB_FD;
-        }
-        if (link.link_speed == ETH_SPEED_NUM_10G) {
-            *current = NETDEV_F_10GB_FD;
+    } else if (link.link_duplex == ETH_LINK_HALF_DUPLEX) {
+        switch (link.link_speed) {
+        case ETH_SPEED_NUM_10M:
+            feature |= NETDEV_F_10MB_HD;
+            break;
+        case ETH_SPEED_NUM_100M:
+            feature |= NETDEV_F_100MB_HD;
+            break;
+        case ETH_SPEED_NUM_1G:
+            feature |= NETDEV_F_1GB_HD;
+            break;
+        default:
+            feature |= NETDEV_F_OTHER;
         }
     }
 
     if (link.link_autoneg) {
-        *current |= NETDEV_F_AUTONEG;
+        feature |= NETDEV_F_AUTONEG;
     }
 
+    *current = feature;
     *advertised = *supported = *peer = 0;
 
     return 0;
@@ -2730,6 +2794,26 @@ netdev_dpdk_update_flags__(struct netdev_dpdk *dev,
     }
 
     if (dev->type == DPDK_DEV_ETH) {
+
+        if ((dev->flags ^ *old_flagsp) & NETDEV_UP) {
+            int err;
+
+            if (dev->flags & NETDEV_UP) {
+                err = rte_eth_dev_set_link_up(dev->port_id);
+            } else {
+                err = rte_eth_dev_set_link_down(dev->port_id);
+            }
+            if (err == -ENOTSUP) {
+                VLOG_INFO("Interface %s does not support link state "
+                          "configuration", netdev_get_name(&dev->up));
+            } else if (err < 0) {
+                VLOG_ERR("Interface %s link change error: %s",
+                         netdev_get_name(&dev->up), rte_strerror(-err));
+                dev->flags = *old_flagsp;
+                return -err;
+            }
+        }
+
         if (dev->flags & NETDEV_PROMISC) {
             rte_eth_promiscuous_enable(dev->port_id);
         }
@@ -2818,11 +2902,10 @@ netdev_dpdk_vhost_user_get_status(const struct netdev *netdev,
 
     for (int i = 0; i < vring_num; i++) {
         struct rte_vhost_vring vring;
-        char vhost_vring[16];
 
         rte_vhost_get_vhost_vring(vid, i, &vring);
-        snprintf(vhost_vring, 16, "vring_%d_size", i);
-        smap_add_format(args, vhost_vring, "%d", vring.size);
+        smap_add_nocopy(args, xasprintf("vring_%d_size", i),
+                        xasprintf("%d", vring.size));
     }
 
     ovs_mutex_unlock(&dev->mutex);
@@ -2866,7 +2949,7 @@ netdev_dpdk_get_status(const struct netdev *netdev, struct smap *args)
                                                dev_info.driver_name);
 
     if (dev_info.pci_dev) {
-        smap_add_format(args, "pci-vendor_id", "0x%u",
+        smap_add_format(args, "pci-vendor_id", "0x%x",
                         dev_info.pci_dev->id.vendor_id);
         smap_add_format(args, "pci-device_id", "0x%x",
                         dev_info.pci_dev->id.device_id);
@@ -3075,9 +3158,17 @@ netdev_dpdk_remap_txqs(struct netdev_dpdk *dev)
         }
     }
 
-    VLOG_DBG("TX queue mapping for %s\n", dev->vhost_id);
-    for (i = 0; i < total_txqs; i++) {
-        VLOG_DBG("%2d --> %2d", i, dev->tx_q[i].map);
+    if (VLOG_IS_DBG_ENABLED()) {
+        struct ds mapping = DS_EMPTY_INITIALIZER;
+
+        ds_put_format(&mapping, "TX queue mapping for port '%s':\n",
+                      netdev_get_name(&dev->up));
+        for (i = 0; i < total_txqs; i++) {
+            ds_put_format(&mapping, "%2d --> %2d\n", i, dev->tx_q[i].map);
+        }
+
+        VLOG_DBG("%s", ds_cstr(&mapping));
+        ds_destroy(&mapping);
     }
 
     free(enabled_queues);
@@ -3245,7 +3336,7 @@ vring_state_changed(int vid, uint16_t queue_id, int enable)
     ovs_mutex_unlock(&dpdk_mutex);
 
     if (exists) {
-        VLOG_INFO("State of queue %d ( tx_qid %d ) of vhost device '%s'"
+        VLOG_INFO("State of queue %d ( tx_qid %d ) of vhost device '%s' "
                   "changed to \'%s\'", queue_id, qid, ifname,
                   (enable == 1) ? "enabled" : "disabled");
     } else {
@@ -3641,13 +3732,15 @@ netdev_dpdk_reconfigure(struct netdev *netdev)
         && dev->lsc_interrupt_mode == dev->requested_lsc_interrupt_mode
         && dev->rxq_size == dev->requested_rxq_size
         && dev->txq_size == dev->requested_txq_size
-        && dev->socket_id == dev->requested_socket_id) {
+        && dev->socket_id == dev->requested_socket_id
+        && dev->started) {
         /* Reconfiguration is unnecessary */
 
         goto out;
     }
 
     rte_eth_dev_stop(dev->port_id);
+    dev->started = false;
 
     if (dev->mtu != dev->requested_mtu
         || dev->socket_id != dev->requested_socket_id) {

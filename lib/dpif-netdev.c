@@ -912,6 +912,7 @@ compare_poll_list(const void *a_, const void *b_)
 static void
 sorted_poll_list(struct dp_netdev_pmd_thread *pmd, struct rxq_poll **list,
                  size_t *n)
+    OVS_REQUIRES(pmd->port_mutex)
 {
     struct rxq_poll *ret, *poll;
     size_t i;
@@ -2624,6 +2625,16 @@ dpif_netdev_flow_put(struct dpif *dpif, const struct dpif_flow_put *put)
         dpif_flow_hash(dpif, &match.flow, sizeof match.flow, &ufid);
     }
 
+    /* The Netlink encoding of datapath flow keys cannot express
+     * wildcarding the presence of a VLAN tag. Instead, a missing VLAN
+     * tag is interpreted as exact match on the fact that there is no
+     * VLAN.  Unless we refactor a lot of code that translates between
+     * Netlink and struct flow representations, we have to do the same
+     * here.  This must be in sync with 'match' in handle_packet_upcall(). */
+    if (!match.wc.masks.vlans[0].tci) {
+        match.wc.masks.vlans[0].tci = htons(0xffff);
+    }
+
     /* Must produce a netdev_flow_key for lookup.
      * Use the same method as employed to create the key when adding
      * the flow to the dplcs to make sure they match. */
@@ -3324,8 +3335,6 @@ port_reconfigure(struct dp_netdev_port *port)
     struct netdev *netdev = port->netdev;
     int i, err;
 
-    port->need_reconfigure = false;
-
     /* Closes the existing 'rxq's. */
     for (i = 0; i < port->n_rxq; i++) {
         netdev_rxq_close(port->rxqs[i].rx);
@@ -3335,7 +3344,7 @@ port_reconfigure(struct dp_netdev_port *port)
     port->n_rxq = 0;
 
     /* Allows 'netdev' to apply the pending configuration changes. */
-    if (netdev_is_reconf_required(netdev)) {
+    if (netdev_is_reconf_required(netdev) || port->need_reconfigure) {
         err = netdev_reconfigure(netdev);
         if (err && (err != EOPNOTSUPP)) {
             VLOG_ERR("Failed to set interface %s new configuration",
@@ -3367,6 +3376,9 @@ port_reconfigure(struct dp_netdev_port *port)
 
     /* Parse affinity list to apply configuration for new queues. */
     dpif_netdev_port_set_rxq_affinity(port, port->rxq_affinity_list);
+
+    /* If reconfiguration was successful mark it as such, so we can use it */
+    port->need_reconfigure = false;
 
     return 0;
 }
@@ -4244,7 +4256,15 @@ dp_netdev_run_meter(struct dp_netdev *dp, struct dp_packet_batch *packets_,
     memset(exceeded_rate, 0, cnt * sizeof *exceeded_rate);
 
     /* All packets will hit the meter at the same time. */
-    long_delta_t = (now - meter->used) / 1000; /* msec */
+    long_delta_t = now / 1000 - meter->used / 1000; /* msec */
+
+    if (long_delta_t < 0) {
+        /* This condition means that we have several threads fighting for a
+           meter lock, and the one who received the packets a bit later wins.
+           Assuming that all racing threads received packets at the same time
+           to avoid overflow. */
+        long_delta_t = 0;
+    }
 
     /* Make sure delta_t will not be too large, so that bucket will not
      * wrap around below. */
@@ -4442,20 +4462,22 @@ dpif_netdev_meter_get(const struct dpif *dpif,
                       struct ofputil_meter_stats *stats, uint16_t n_bands)
 {
     const struct dp_netdev *dp = get_dp_netdev(dpif);
-    const struct dp_meter *meter;
     uint32_t meter_id = meter_id_.uint32;
+    int retval = 0;
 
     if (meter_id >= MAX_METERS) {
         return EFBIG;
     }
-    meter = dp->meters[meter_id];
+
+    meter_lock(dp, meter_id);
+    const struct dp_meter *meter = dp->meters[meter_id];
     if (!meter) {
-        return ENOENT;
+        retval = ENOENT;
+        goto done;
     }
     if (stats) {
         int i = 0;
 
-        meter_lock(dp, meter_id);
         stats->packet_in_count = meter->packet_count;
         stats->byte_in_count = meter->byte_count;
 
@@ -4463,11 +4485,13 @@ dpif_netdev_meter_get(const struct dpif *dpif,
             stats->bands[i].packet_count = meter->bands[i].packet_count;
             stats->bands[i].byte_count = meter->bands[i].byte_count;
         }
-        meter_unlock(dp, meter_id);
 
         stats->n_bands = i;
     }
-    return 0;
+
+done:
+    meter_unlock(dp, meter_id);
+    return retval;
 }
 
 static int
@@ -4903,7 +4927,6 @@ dpif_netdev_packet_get_rss_hash(struct dp_packet *packet,
     recirc_depth = *recirc_depth_get_unsafe();
     if (OVS_UNLIKELY(recirc_depth)) {
         hash = hash_finish(hash, recirc_depth);
-        dp_packet_set_rss_hash(packet, hash);
     }
     return hash;
 }
@@ -5025,18 +5048,13 @@ emc_processing(struct dp_netdev_pmd_thread *pmd,
         }
         miniflow_extract(packet, &key->mf);
         key->len = 0; /* Not computed yet. */
-        /* If EMC is disabled skip hash computation and emc_lookup */
-        if (cur_min) {
-            if (!md_is_valid) {
-                key->hash = dpif_netdev_packet_get_rss_hash_orig_pkt(packet,
-                        &key->mf);
-            } else {
-                key->hash = dpif_netdev_packet_get_rss_hash(packet, &key->mf);
-            }
-            flow = emc_lookup(flow_cache, key);
-        } else {
-            flow = NULL;
-        }
+        key->hash =
+                (md_is_valid == false)
+                ? dpif_netdev_packet_get_rss_hash_orig_pkt(packet, &key->mf)
+                : dpif_netdev_packet_get_rss_hash(packet, &key->mf);
+
+        /* If EMC is disabled skip emc_lookup. */
+        flow = (cur_min != 0) ? emc_lookup(flow_cache, key) : NULL;
         if (OVS_LIKELY(flow)) {
             dp_netdev_queue_batches(packet, flow, &key->mf, batches,
                                     n_batches);
@@ -5089,7 +5107,7 @@ handle_packet_upcall(struct dp_netdev_pmd_thread *pmd,
      * tag is interpreted as exact match on the fact that there is no
      * VLAN.  Unless we refactor a lot of code that translates between
      * Netlink and struct flow representations, we have to do the same
-     * here. */
+     * here.  This must be in sync with 'match' in dpif_netdev_flow_put(). */
     if (!match.wc.masks.vlans[0].tci) {
         match.wc.masks.vlans[0].tci = htons(0xffff);
     }
@@ -5109,8 +5127,7 @@ handle_packet_upcall(struct dp_netdev_pmd_thread *pmd,
          * could have already been installed since we last did the flow
          * lookup before upcall.  This could be solved by moving the
          * mutex lock outside the loop, but that's an awful long time
-         * to be locking everyone out of making flow installs.  If we
-         * move to a per-core classifier, it would be reasonable. */
+         * to be locking revalidators out of making flow modifications. */
         ovs_mutex_lock(&pmd->flow_mutex);
         netdev_flow = dp_netdev_pmd_lookup_flow(pmd, key, NULL);
         if (OVS_LIKELY(!netdev_flow)) {
@@ -5504,12 +5521,23 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
         break;
 
     case OVS_ACTION_ATTR_TUNNEL_PUSH:
-        if (*depth < MAX_RECIRC_DEPTH) {
-            dp_packet_batch_apply_cutlen(packets_);
-            push_tnl_action(pmd, a, packets_);
-            return;
+        /*
+         * XXX: 'may_steal' concept is broken here, because we're
+         *      unconditionally changing the packets just like for other PUSH_*
+         *      actions in 'odp_execute()'. 'false' value could be ignored,
+         *      because we could reach here only after clone, but we still need
+         *      to free the packets in case 'may_steal == true'.
+         */
+        if (may_steal) {
+            /* We're requested to push tunnel header, but also we need to take
+             * the ownership of these packets. Thus, we can avoid performing
+             * the action, because the caller will not use the result anyway.
+             * Just break to free the batch. */
+            break;
         }
-        break;
+        dp_packet_batch_apply_cutlen(packets_);
+        push_tnl_action(pmd, a, packets_);
+        return;
 
     case OVS_ACTION_ATTR_TUNNEL_POP:
         if (*depth < MAX_RECIRC_DEPTH) {

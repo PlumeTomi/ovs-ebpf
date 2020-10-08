@@ -453,7 +453,8 @@ sflow_choose_agent_address(const char *agent_device,
     agent_addr->type = SFLADDRESSTYPE_IP_V4;
 
     if (agent_device) {
-        if (!netdev_get_in4_by_name(agent_device, &in4)) {
+        if (!netdev_get_in4_by_name(agent_device, &in4)
+            || !lookup_ip(agent_device, &in4)) {
             goto success;
         }
     }
@@ -1013,7 +1014,7 @@ sflow_read_set_action(const struct nlattr *attr,
                 sflow_actions->tunnel.ip_tos = key->ipv4_tos;
             }
             if (key->ipv4_ttl) {
-                sflow_actions->tunnel.ip_tos = key->ipv4_ttl;
+                sflow_actions->tunnel.ip_ttl = key->ipv4_ttl;
             }
         }
         break;

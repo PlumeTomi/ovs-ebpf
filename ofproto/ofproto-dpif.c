@@ -2217,24 +2217,24 @@ set_lldp(struct ofport *ofport_,
          const struct smap *cfg)
 {
     struct ofport_dpif *ofport = ofport_dpif_cast(ofport_);
+    struct ofproto_dpif *ofproto = ofproto_dpif_cast(ofport->up.ofproto);
     int error = 0;
 
     if (cfg) {
         if (!ofport->lldp) {
-            struct ofproto_dpif *ofproto;
-
-            ofproto = ofproto_dpif_cast(ofport->up.ofproto);
             ofproto->backer->need_revalidate = REV_RECONFIGURE;
             ofport->lldp = lldp_create(ofport->up.netdev, ofport_->mtu, cfg);
         }
 
         if (!lldp_configure(ofport->lldp, cfg)) {
+            lldp_unref(ofport->lldp);
+            ofport->lldp = NULL;
             error = EINVAL;
         }
-    }
-    if (error) {
+    } else if (ofport->lldp) {
         lldp_unref(ofport->lldp);
         ofport->lldp = NULL;
+        ofproto->backer->need_revalidate = REV_RECONFIGURE;
     }
 
     ofproto_dpif_monitor_port_update(ofport,
@@ -4655,12 +4655,13 @@ ofproto_dpif_xcache_execute(struct ofproto_dpif *ofproto,
 }
 
 static void
-packet_execute(struct ofproto *ofproto_, struct ofproto_packet_out *opo)
+packet_execute_prepare(struct ofproto *ofproto_,
+                       struct ofproto_packet_out *opo)
     OVS_REQUIRES(ofproto_mutex)
 {
     struct ofproto_dpif *ofproto = ofproto_dpif_cast(ofproto_);
     struct dpif_flow_stats stats;
-    struct dpif_execute execute;
+    struct dpif_execute *execute;
 
     struct ofproto_dpif_packet_out *aux = opo->aux;
     ovs_assert(aux);
@@ -4669,22 +4670,40 @@ packet_execute(struct ofproto *ofproto_, struct ofproto_packet_out *opo)
     dpif_flow_stats_extract(opo->flow, opo->packet, time_msec(), &stats);
     ofproto_dpif_xcache_execute(ofproto, &aux->xcache, &stats);
 
-    execute.actions = aux->odp_actions.data;
-    execute.actions_len = aux->odp_actions.size;
+    execute = xzalloc(sizeof *execute);
+    execute->actions = xmemdup(aux->odp_actions.data, aux->odp_actions.size);
+    execute->actions_len = aux->odp_actions.size;
 
     pkt_metadata_from_flow(&opo->packet->md, opo->flow);
-    execute.packet = opo->packet;
-    execute.flow = opo->flow;
-    execute.needs_help = aux->needs_help;
-    execute.probe = false;
-    execute.mtu = 0;
+    execute->packet = opo->packet;
+    execute->flow = opo->flow;
+    execute->needs_help = aux->needs_help;
+    execute->probe = false;
+    execute->mtu = 0;
 
     /* Fix up in_port. */
     ofproto_dpif_set_packet_odp_port(ofproto, opo->flow->in_port.ofp_port,
                                      opo->packet);
 
-    dpif_execute(ofproto->backer->dpif, &execute);
     ofproto_dpif_packet_out_delete(aux);
+    opo->aux = execute;
+}
+
+static void
+packet_execute(struct ofproto *ofproto_, struct ofproto_packet_out *opo)
+    OVS_EXCLUDED(ofproto_mutex)
+{
+    struct ofproto_dpif *ofproto = ofproto_dpif_cast(ofproto_);
+    struct dpif_execute *execute = opo->aux;
+
+    if (!execute) {
+        return;
+    }
+
+    dpif_execute(ofproto->backer->dpif, execute);
+
+    free(CONST_CAST(struct nlattr *, execute->actions));
+    free(execute);
     opo->aux = NULL;
 }
 
@@ -4866,17 +4885,28 @@ nxt_resume(struct ofproto *ofproto_,
            const struct ofputil_packet_in_private *pin)
 {
     struct ofproto_dpif *ofproto = ofproto_dpif_cast(ofproto_);
+    struct dpif_flow_stats stats;
+    struct xlate_cache xcache;
+    struct flow flow;
+    xlate_cache_init(&xcache);
 
     /* Translate pin into datapath actions. */
     uint64_t odp_actions_stub[1024 / 8];
     struct ofpbuf odp_actions = OFPBUF_STUB_INITIALIZER(odp_actions_stub);
     enum slow_path_reason slow;
-    enum ofperr error = xlate_resume(ofproto, pin, &odp_actions, &slow);
+    enum ofperr error = xlate_resume(ofproto, pin, &odp_actions, &slow,
+                                     &flow, &xcache);
 
     /* Steal 'pin->packet' and put it into a dp_packet. */
     struct dp_packet packet;
     dp_packet_init(&packet, pin->base.packet_len);
     dp_packet_put(&packet, pin->base.packet, pin->base.packet_len);
+
+    /* Run the side effects from the xcache. */
+    dpif_flow_stats_extract(&flow, &packet, time_msec(), &stats);
+    ovs_mutex_lock(&ofproto_mutex);
+    ofproto_dpif_xcache_execute(ofproto, &xcache, &stats);
+    ovs_mutex_unlock(&ofproto_mutex);
 
     pkt_metadata_from_flow(&packet.md, &pin->base.flow_metadata.flow);
 
@@ -5697,11 +5727,11 @@ meter_set(struct ofproto *ofproto_, ofproto_meter_id *meter_id,
     /* Provider ID unknown. Use backer to allocate a new DP meter */
     if (meter_id->uint32 == UINT32_MAX) {
         if (!ofproto->backer->meter_ids) {
-            return EFBIG; /* Datapath does not support meter.  */
+            return OFPERR_OFPMMFC_OUT_OF_METERS; /* Meters not supported. */
         }
 
         if(!id_pool_alloc_id(ofproto->backer->meter_ids, &meter_id->uint32)) {
-            return ENOMEM; /* Can't allocate a DP meter. */
+            return OFPERR_OFPMMFC_OUT_OF_METERS; /* Can't allocate meter. */
         }
     }
 
@@ -5815,6 +5845,7 @@ const struct ofproto_class ofproto_dpif_class = {
     rule_get_stats,
     packet_xlate,
     packet_xlate_revert,
+    packet_execute_prepare,
     packet_execute,
     set_frag_handling,
     nxt_resume,

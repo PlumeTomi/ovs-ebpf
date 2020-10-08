@@ -183,6 +183,8 @@ AC_DEFUN([OVS_CHECK_LINUX_TC], [
     [AC_DEFINE([HAVE_TCA_FLOWER_KEY_IP_TTL_MASK], [1],
                [Define to 1 if TCA_FLOWER_KEY_IP_TTL_MASK is avaiable.])])
 
+  AC_CHECK_MEMBERS([struct tcf_t.firstuse], [], [], [#include <linux/pkt_cls.h>])
+
   AC_COMPILE_IFELSE([
     AC_LANG_PROGRAM([#include <linux/tc_act/tc_vlan.h>], [
         int x = TCA_VLAN_PUSH_VLAN_PRIORITY;
@@ -242,7 +244,6 @@ AC_DEFUN([OVS_CHECK_DPDK], [
     esac
 
     DPDK_LIB="-ldpdk"
-    DPDK_EXTRA_LIB=""
 
     ovs_save_CFLAGS="$CFLAGS"
     ovs_save_LDFLAGS="$LDFLAGS"
@@ -255,13 +256,12 @@ AC_DEFUN([OVS_CHECK_DPDK], [
       AC_LANG_PROGRAM(
         [
           #include <rte_config.h>
-#if RTE_LIBRTE_VHOST_NUMA
+#if defined(RTE_LIBRTE_VHOST_NUMA) || defined(RTE_EAL_NUMA_AWARE_HUGEPAGES)
 #error
 #endif
         ], [])
       ], [],
       [AC_SEARCH_LIBS([get_mempolicy],[numa],[],[AC_MSG_ERROR([unable to find libnuma, install the dependency package])])
-       DPDK_EXTRA_LIB="-lnuma"
        AC_DEFINE([VHOST_NUMA], [1], [NUMA Aware vHost support detected in DPDK.])])
 
     AC_COMPILE_IFELSE([
@@ -274,7 +274,6 @@ AC_DEFUN([OVS_CHECK_DPDK], [
         ], [])
       ], [],
       [AC_SEARCH_LIBS([pcap_dump],[pcap],[],[AC_MSG_ERROR([unable to find libpcap, install the dependency package])])
-       DPDK_EXTRA_LIB="-lpcap"
        AC_COMPILE_IFELSE([
          AC_LANG_PROGRAM(
            [
@@ -297,7 +296,7 @@ AC_DEFUN([OVS_CHECK_DPDK], [
     DPDKLIB_FOUND=false
     save_LIBS=$LIBS
     for extras in "" "-ldl"; do
-        LIBS="$DPDK_LIB $extras $save_LIBS $DPDK_EXTRA_LIB"
+        LIBS="$DPDK_LIB $extras $save_LIBS"
         AC_LINK_IFELSE(
            [AC_LANG_PROGRAM([#include <rte_config.h>
                              #include <rte_eal.h>],
@@ -851,6 +850,9 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
   OVS_GREP_IFELSE([$KSRC/include/net/inet_frag.h],
                   frag_percpu_counter_batch[],
                   [OVS_DEFINE([HAVE_FRAG_PERCPU_COUNTER_BATCH])])
+  OVS_FIND_FIELD_IFELSE([$KSRC/include/net/inet_frag.h], [inet_frags],
+                        [rnd],
+                        [OVS_DEFINE([HAVE_INET_FRAGS_RND])])
 
   if cmp -s datapath/linux/kcompat.h.new \
             datapath/linux/kcompat.h >/dev/null 2>&1; then

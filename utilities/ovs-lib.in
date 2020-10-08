@@ -125,7 +125,7 @@ fi
 pid_exists () {
     # This is better than "kill -0" because it doesn't require permission to
     # send a signal (so daemon_status in particular works as non-root).
-    test -d /proc/"$1"
+    test -n "$1" && test -d /proc/"$1"
 }
 
 pid_comm_check () {
@@ -387,7 +387,10 @@ move_ip_routes () {
 
 ovsdb_tool () {
     if [ "$OVS_USER" != "" ]; then
-        runuser --user "${OVS_USER%:*}" -- ovsdb-tool -vconsole:off "$@"
+        local uid=$(id -u "${OVS_USER%:*}")
+        local gid=$(id -g "${OVS_USER%:*}")
+        local groups=$(id -G "${OVS_USER%:*}" | tr ' ' ',')
+        setpriv --reuid "$uid" --regid "$gid" --groups "$groups" ovsdb-tool -vconsole:off "$@"
     else
         ovsdb-tool -vconsole:off "$@"
     fi
@@ -472,6 +475,7 @@ create_cluster () {
     elif ovsdb_tool db-is-standalone "$DB_FILE"; then
         # Convert standalone database to clustered.
         backup_db || return 1
+        rm -f "$DB_FILE"
         action "Creating cluster database $DB_FILE from existing one" \
                ovsdb_tool create-cluster "$DB_FILE" "$backup" "$LOCAL_ADDR"
     fi

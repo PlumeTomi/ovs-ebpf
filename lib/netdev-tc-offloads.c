@@ -161,8 +161,20 @@ del_ufid_tc_mapping(const ovs_u128 *ufid)
     ovs_mutex_unlock(&ufid_lock);
 }
 
-/* Add ufid entry to ufid_tc hashmap.
- * If entry exists already it will be replaced. */
+/* Wrapper function to delete filter and ufid tc mapping */
+static int
+del_filter_and_ufid_mapping(int ifindex, int prio, int handle,
+                            const ovs_u128 *ufid)
+{
+    int err;
+
+    err = tc_del_filter(ifindex, prio, handle);
+    del_ufid_tc_mapping(ufid);
+
+    return err;
+}
+
+/* Add ufid entry to ufid_tc hashmap. */
 static void
 add_ufid_tc_mapping(const ovs_u128 *ufid, int prio, int handle,
                     struct netdev *netdev, int ifindex)
@@ -170,8 +182,6 @@ add_ufid_tc_mapping(const ovs_u128 *ufid, int prio, int handle,
     size_t ufid_hash = hash_bytes(ufid, sizeof *ufid, 0);
     size_t tc_hash = hash_int(hash_int(prio, handle), ifindex);
     struct ufid_tc_data *new_data = xzalloc(sizeof *new_data);
-
-    del_ufid_tc_mapping(ufid);
 
     new_data->ufid = *ufid;
     new_data->prio = prio;
@@ -820,14 +830,18 @@ test_key_and_mask(struct match *match)
                key->nw_proto == IPPROTO_ICMPV6) {
         if (mask->tp_src) {
             VLOG_DBG_RL(&rl,
-                        "offloading attribute icmp_type isn't supported");
+                        "offloading attribute icmpv6_type isn't supported");
             return EOPNOTSUPP;
         }
         if (mask->tp_dst) {
             VLOG_DBG_RL(&rl,
-                        "offloading attribute icmp_code isn't supported");
+                        "offloading attribute icmpv6_code isn't supported");
             return EOPNOTSUPP;
         }
+    } else if (key->dl_type == htons(OFP_DL_TYPE_NOT_ETH_TYPE)) {
+        VLOG_DBG_RL(&rl,
+                    "offloading of non-ethernet packets isn't supported");
+        return EOPNOTSUPP;
     }
 
     if (!is_all_zeros(mask, sizeof *mask)) {
@@ -897,10 +911,12 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
             && (vid_mask || pcp_mask)) {
             if (vid_mask) {
                 flower.key.vlan_id = vlan_tci_to_vid(key->vlans[0].tci);
+                flower.mask.vlan_id = vlan_tci_to_vid(mask->vlans[0].tci);
                 VLOG_DBG_RL(&rl, "vlan_id: %d\n", flower.key.vlan_id);
             }
             if (pcp_mask) {
                 flower.key.vlan_prio = vlan_tci_to_pcp(key->vlans[0].tci);
+                flower.mask.vlan_prio = vlan_tci_to_pcp(mask->vlans[0].tci);
                 VLOG_DBG_RL(&rl, "vlan_prio: %d\n", flower.key.vlan_prio);
             }
             flower.key.encap_eth_type = flower.key.eth_type;
@@ -929,8 +945,10 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
     if (is_ip_any(key)) {
         flower.key.ip_proto = key->nw_proto;
         flower.mask.ip_proto = mask->nw_proto;
+        mask->nw_proto = 0;
         flower.key.ip_ttl = key->nw_ttl;
         flower.mask.ip_ttl = mask->nw_ttl;
+        mask->nw_ttl = 0;
 
         if (key->nw_proto == IPPROTO_TCP) {
             flower.key.tcp_dst = key->tp_dst;
@@ -960,8 +978,6 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
 
         mask->nw_frag = 0;
         mask->nw_tos = 0;
-        mask->nw_proto = 0;
-        mask->nw_ttl = 0;
 
         if (key->dl_type == htons(ETH_P_IP)) {
             flower.key.ipv4.ipv4_src = key->nw_src;
@@ -980,6 +996,11 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
         }
     }
 
+    /* ignore exact match on skb_mark of 0. */
+    if (mask->pkt_mark == UINT32_MAX && !key->pkt_mark) {
+        mask->pkt_mark = 0;
+    }
+
     err = test_key_and_mask(match);
     if (err) {
         return err;
@@ -990,6 +1011,10 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
             odp_port_t port = nl_attr_get_odp_port(nla);
             struct netdev *outdev = netdev_ports_get(port, info->dpif_class);
 
+            if (!outdev) {
+                VLOG_DBG_RL(&rl, "Can't find netdev for output port %d", port);
+                return ENODEV;
+            }
             flower.ifindex_out = netdev_get_ifindex(outdev);
             flower.set.tp_dst = info->tp_dst_port;
             netdev_close(outdev);
@@ -1026,8 +1051,12 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
 
     handle = get_ufid_tc_mapping(ufid, &prio, NULL);
     if (handle && prio) {
+        bool flow_deleted;
+
         VLOG_DBG_RL(&rl, "updating old handle: %d prio: %d", handle, prio);
-        tc_del_filter(ifindex, prio, handle);
+        flow_deleted = !del_filter_and_ufid_mapping(ifindex, prio,
+						    handle, ufid);
+        info->tc_modify_flow_deleted = flow_deleted;
     }
 
     if (!prio) {
@@ -1132,8 +1161,7 @@ netdev_tc_flow_del(struct netdev *netdev OVS_UNUSED,
         }
     }
 
-    error = tc_del_filter(ifindex, prio, handle);
-    del_ufid_tc_mapping(ufid);
+    error = del_filter_and_ufid_mapping(ifindex, prio, handle, ufid);
 
     netdev_close(dev);
 

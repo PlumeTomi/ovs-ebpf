@@ -425,6 +425,7 @@ do_ca_cert_bootstrap(struct stream *stream)
 static char *
 get_peer_common_name(const struct ssl_stream *sslv)
 {
+    char *peer_name = NULL;
     X509 *peer_cert = SSL_get_peer_certificate(sslv->ssl);
     if (!peer_cert) {
         return NULL;
@@ -433,18 +434,18 @@ get_peer_common_name(const struct ssl_stream *sslv)
     int cn_index = X509_NAME_get_index_by_NID(X509_get_subject_name(peer_cert),
                                               NID_commonName, -1);
     if (cn_index < 0) {
-        return NULL;
+        goto error;
     }
 
     X509_NAME_ENTRY *cn_entry = X509_NAME_get_entry(
         X509_get_subject_name(peer_cert), cn_index);
     if (!cn_entry) {
-        return NULL;
+        goto error;
     }
 
     ASN1_STRING *cn_data = X509_NAME_ENTRY_get_data(cn_entry);
     if (!cn_data) {
-        return NULL;
+        goto error;
     }
 
     const char *cn;
@@ -454,7 +455,11 @@ get_peer_common_name(const struct ssl_stream *sslv)
 #else
     cn = (const char *)ASN1_STRING_get0_data(cn_data);
  #endif
-    return xstrdup(cn);
+    peer_name = xstrdup(cn);
+
+error:
+    X509_free(peer_cert);
+    return peer_name;
 }
 
 static int
@@ -1155,7 +1160,7 @@ stream_ssl_set_key_and_cert(const char *private_key_file,
                             const char *certificate_file)
 {
     if (update_ssl_config(&private_key, private_key_file)
-        || update_ssl_config(&certificate, certificate_file)) {
+        && update_ssl_config(&certificate, certificate_file)) {
         stream_ssl_set_certificate_file__(certificate_file);
         stream_ssl_set_private_key_file__(private_key_file);
     }
@@ -1186,8 +1191,13 @@ stream_ssl_set_protocols(const char *arg)
     }
 
     /* Start with all the flags off and turn them on as requested. */
-    long protocol_flags = SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1;
-    protocol_flags |= SSL_OP_NO_TLSv1_1 | SSL_OP_NO_TLSv1_2;
+#ifndef SSL_OP_NO_SSL_MASK
+    /* For old OpenSSL without this macro, this is the correct value.  */
+#define SSL_OP_NO_SSL_MASK (SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | \
+                            SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1 | \
+                            SSL_OP_NO_TLSv1_2)
+#endif
+    long protocol_flags = SSL_OP_NO_SSL_MASK;
 
     char *s = xstrdup(arg);
     char *save_ptr = NULL;

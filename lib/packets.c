@@ -1689,7 +1689,6 @@ packet_put_ra_prefix_opt(struct dp_packet *b,
     struct ip6_hdr *nh = dp_packet_l3(b);
     nh->ip6_plen = htons(prev_l4_size + ND_PREFIX_OPT_LEN);
 
-    struct ovs_ra_msg *ra = dp_packet_l4(b);
     struct ovs_nd_prefix_opt *prefix_opt =
         dp_packet_put_uninit(b, sizeof *prefix_opt);
     prefix_opt->type = ND_OPT_PREFIX_INFORMATION;
@@ -1701,6 +1700,7 @@ packet_put_ra_prefix_opt(struct dp_packet *b,
     put_16aligned_be32(&prefix_opt->reserved, 0);
     memcpy(prefix_opt->prefix.be32, prefix.be32, sizeof(ovs_be32[4]));
 
+    struct ovs_ra_msg *ra = dp_packet_l4(b);
     ra->icmph.icmp6_cksum = 0;
     uint32_t icmp_csum = packet_csum_pseudoheader6(dp_packet_l3(b));
     ra->icmph.icmp6_cksum = csum_finish(csum_continue(
@@ -1738,7 +1738,7 @@ packet_csum_pseudoheader6(const struct ovs_16aligned_ip6_hdr *ip6)
 /* Calculate the IPv6 upper layer checksum according to RFC2460. We pass the
    ip6_nxt and ip6_plen values, so it will also work if extension headers
    are present. */
-uint16_t
+ovs_be16
 packet_csum_upperlayer6(const struct ovs_16aligned_ip6_hdr *ip6,
                         const void *data, uint8_t l4_protocol,
                         uint16_t l4_size)

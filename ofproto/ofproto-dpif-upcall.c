@@ -1037,6 +1037,7 @@ compose_slow_path(struct udpif *udpif, struct xlate_out *xout,
     odp_port_t port;
     uint32_t pid;
 
+    memset(&cookie, 0, sizeof cookie);
     cookie.type = USER_ACTION_COOKIE_SLOW_PATH;
     cookie.ofp_in_port = ofp_in_port;
     cookie.ofproto_uuid = *ofproto_uuid;
@@ -1736,7 +1737,7 @@ ukey_create_from_dpif_flow(const struct udpif *udpif,
     }
 
     reval_seq = seq_read(udpif->reval_seq) - 1; /* Ensure revalidation. */
-    ofpbuf_use_const(&actions, &flow->actions, flow->actions_len);
+    ofpbuf_use_const(&actions, flow->actions, flow->actions_len);
     *ukey = ukey_create__(flow->key, flow->key_len,
                           flow->mask, flow->mask_len, flow->ufid_present,
                           &flow->ufid, flow->pmd_id, &actions,

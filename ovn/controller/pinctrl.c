@@ -736,6 +736,12 @@ pinctrl_handle_dns_lookup(
         goto exit;
     }
 
+    /* Check that the packet stores at least the minimal headers. */
+    if (dp_packet_l4_size(pkt_in) < (UDP_HEADER_LEN + DNS_HEADER_LEN)) {
+        VLOG_WARN_RL(&rl, "truncated dns packet");
+        goto exit;
+    }
+
     /* Extract the DNS header */
     struct dns_header const *in_dns_header = dp_packet_get_udp_payload(pkt_in);
     if (!in_dns_header) {
@@ -760,7 +766,7 @@ pinctrl_handle_dns_lookup(
     uint8_t *end = (uint8_t *)in_udp + MIN(udp_len, l4_len);
     uint8_t *in_dns_data = (uint8_t *)(in_dns_header + 1);
     uint8_t *in_queryname = in_dns_data;
-    uint8_t idx = 0;
+    uint16_t idx = 0;
     struct ds query_name;
     ds_init(&query_name);
     /* Extract the query_name. If the query name is - 'www.ovn.org' it would be
@@ -1194,7 +1200,7 @@ ipv6_ra_update_config(const struct sbrec_port_binding *pb)
     config->min_interval = smap_get_int(&pb->options, "ipv6_ra_min_interval",
             nd_ra_min_interval_default(config->max_interval));
     config->mtu = smap_get_int(&pb->options, "ipv6_ra_mtu", ND_MTU_DEFAULT);
-    config->la_flags = ND_PREFIX_ON_LINK;
+    config->la_flags = IPV6_ND_RA_OPT_PREFIX_ON_LINK;
 
     const char *address_mode = smap_get(&pb->options, "ipv6_ra_address_mode");
     if (!address_mode) {
@@ -1203,10 +1209,11 @@ ipv6_ra_update_config(const struct sbrec_port_binding *pb)
     }
     if (!strcmp(address_mode, "dhcpv6_stateless")) {
         config->mo_flags = IPV6_ND_RA_FLAG_OTHER_ADDR_CONFIG;
+        config->la_flags |= IPV6_ND_RA_OPT_PREFIX_AUTONOMOUS;
     } else if (!strcmp(address_mode, "dhcpv6_stateful")) {
         config->mo_flags = IPV6_ND_RA_FLAG_MANAGED_ADDR_CONFIG;
     } else if (!strcmp(address_mode, "slaac")) {
-        config->la_flags |= ND_PREFIX_AUTONOMOUS_ADDRESS;
+        config->la_flags |= IPV6_ND_RA_OPT_PREFIX_AUTONOMOUS;
     } else {
         VLOG_WARN("Invalid address mode %s", address_mode);
         goto fail;
@@ -1380,6 +1387,11 @@ send_ipv6_ras(const struct controller_ctx *ctx, struct hmap *local_datapaths)
                     ra->config->max_interval);
                 shash_add(&ipv6_ras, pb->logical_port, ra);
             } else {
+                if (config->min_interval != ra->config->min_interval ||
+                    config->max_interval != ra->config->max_interval)
+                    ra->next_announce = ipv6_ra_calc_next_announce(
+                        config->min_interval,
+                        config->max_interval);
                 ipv6_ra_config_delete(ra->config);
                 ra->config = config;
             }

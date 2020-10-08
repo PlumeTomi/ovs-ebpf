@@ -1964,27 +1964,18 @@ ofproto_port_dump_done(struct ofproto_port_dump *dump)
     return dump->error == EOF ? 0 : dump->error;
 }
 
-/* Returns the type to pass to netdev_open() when a datapath of type
- * 'datapath_type' has a port of type 'port_type', for a few special
- * cases when a netdev type differs from a port type.  For example, when
- * using the userspace datapath, a port of type "internal" needs to be
- * opened as "tap".
+/* Returns the type to pass to netdev_open() when 'ofproto' has a port of type
+ * 'port_type', for a few special cases when a netdev type differs from a port
+ * type.  For example, when using the userspace datapath, a port of type
+ * "internal" needs to be opened as "tap".
  *
  * Returns either 'type' itself or a string literal, which must not be
  * freed. */
 const char *
-ofproto_port_open_type(const char *datapath_type, const char *port_type)
+ofproto_port_open_type(const struct ofproto *ofproto, const char *port_type)
 {
-    const struct ofproto_class *class;
-
-    datapath_type = ofproto_normalize_type(datapath_type);
-    class = ofproto_class_find__(datapath_type);
-    if (!class) {
-        return port_type;
-    }
-
-    return (class->port_open_type
-            ? class->port_open_type(datapath_type, port_type)
+    return (ofproto->ofproto_class->port_open_type
+            ? ofproto->ofproto_class->port_open_type(ofproto->type, port_type)
             : port_type);
 }
 
@@ -2492,6 +2483,9 @@ ofproto_port_unregister(struct ofproto *ofproto, ofp_port_t ofp_port)
 {
     struct ofport *port = ofproto_get_port(ofproto, ofp_port);
     if (port) {
+        if (port->ofproto->ofproto_class->set_lldp) {
+            port->ofproto->ofproto_class->set_lldp(port, NULL);
+        }
         if (port->ofproto->ofproto_class->set_stp_port) {
             port->ofproto->ofproto_class->set_stp_port(port, NULL);
         }
@@ -2726,10 +2720,9 @@ init_ports(struct ofproto *p)
 static bool
 ofport_is_internal_or_patch(const struct ofproto *p, const struct ofport *port)
 {
-    return !strcmp(netdev_get_type(port->netdev),
-                   ofproto_port_open_type(p->type, "internal")) ||
-           !strcmp(netdev_get_type(port->netdev),
-                   ofproto_port_open_type(p->type, "patch"));
+    const char *netdev_type = netdev_get_type(port->netdev);
+    return !strcmp(netdev_type, ofproto_port_open_type(p, "internal")) ||
+           !strcmp(netdev_type, ofproto_port_open_type(p, "patch"));
 }
 
 /* If 'port' is internal or patch and if the user didn't explicitly specify an
@@ -3536,9 +3529,20 @@ ofproto_packet_out_revert(struct ofproto *ofproto,
 }
 
 static void
+ofproto_packet_out_prepare(struct ofproto *ofproto,
+                           struct ofproto_packet_out *opo)
+    OVS_REQUIRES(ofproto_mutex)
+{
+    ofproto->ofproto_class->packet_execute_prepare(ofproto, opo);
+}
+
+/* Execution of packet_out action in datapath could end up in upcall with
+ * subsequent flow translations and possible rule modifications.
+ * So, the caller should not hold 'ofproto_mutex'. */
+static void
 ofproto_packet_out_finish(struct ofproto *ofproto,
                           struct ofproto_packet_out *opo)
-    OVS_REQUIRES(ofproto_mutex)
+    OVS_EXCLUDED(ofproto_mutex)
 {
     ofproto->ofproto_class->packet_execute(ofproto, opo);
 }
@@ -3581,10 +3585,13 @@ handle_packet_out(struct ofconn *ofconn, const struct ofp_header *oh)
     opo.version = p->tables_version;
     error = ofproto_packet_out_start(p, &opo);
     if (!error) {
-        ofproto_packet_out_finish(p, &opo);
+        ofproto_packet_out_prepare(p, &opo);
     }
     ovs_mutex_unlock(&ofproto_mutex);
 
+    if (!error) {
+        ofproto_packet_out_finish(p, &opo);
+    }
     ofproto_packet_out_uninit(&opo);
     return error;
 }
@@ -7156,6 +7163,8 @@ modify_group_start(struct ofproto *ofproto, struct ofproto_group_mod *ogm)
     *CONST_CAST(long long int *, &(new_group->created)) = old_group->created;
     *CONST_CAST(long long int *, &(new_group->modified)) = time_msec();
 
+    *CONST_CAST(uint32_t *, &(new_group->n_buckets)) =
+        ovs_list_size(&(new_group->buckets));
     group_collection_add(&ogm->old_groups, old_group);
 
     /* Mark the old group for deletion. */
@@ -7839,7 +7848,7 @@ do_bundle_commit(struct ofconn *ofconn, uint32_t id, uint16_t flags)
                     } else if (be->type == OFPTYPE_GROUP_MOD) {
                         ofproto_group_mod_finish(ofproto, &be->ogm, &req);
                     } else if (be->type == OFPTYPE_PACKET_OUT) {
-                        ofproto_packet_out_finish(ofproto, &be->opo);
+                        ofproto_packet_out_prepare(ofproto, &be->opo);
                     }
                 }
             }
@@ -7847,6 +7856,13 @@ do_bundle_commit(struct ofconn *ofconn, uint32_t id, uint16_t flags)
 
         ofmonitor_flush(ofproto->connmgr);
         ovs_mutex_unlock(&ofproto_mutex);
+    }
+
+    /* Executing remaining datapath actions. */
+    LIST_FOR_EACH (be, node, &bundle->msg_list) {
+        if (be->type == OFPTYPE_PACKET_OUT) {
+            ofproto_packet_out_finish(ofproto, &be->opo);
+        }
     }
 
     /* The bundle is discarded regardless the outcome. */
@@ -8655,7 +8671,7 @@ ofproto_rule_insert__(struct ofproto *ofproto, struct rule *rule)
     const struct rule_actions *actions = rule_get_actions(rule);
 
     /* A rule may not be reinserted. */
-    ovs_assert(rule->state == RULE_INITIALIZED);
+    ovs_assert(rule->state != RULE_INSERTED);
 
     if (rule->hard_timeout || rule->idle_timeout) {
         ovs_list_insert(&ofproto->expirable, &rule->expirable);

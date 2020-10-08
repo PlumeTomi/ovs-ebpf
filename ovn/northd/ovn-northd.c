@@ -59,6 +59,7 @@ struct northd_context {
 
 static const char *ovnnb_db;
 static const char *ovnsb_db;
+static const char *unixctl_path;
 
 #define MAC_ADDR_PREFIX 0x0A0000000000ULL
 #define MAC_ADDR_SPACE 0xffffff
@@ -239,6 +240,7 @@ Options:\n\
                             (default: %s)\n\
   --ovnsb-db=DATABASE       connect to ovn-sb database at DATABASE\n\
                             (default: %s)\n\
+  --unixctl=SOCKET          override default control socket name\n\
   -h, --help                display this help message\n\
   -o, --options             list available options\n\
   -V, --version             display version information\n\
@@ -375,6 +377,7 @@ free_chassis_queueid(struct hmap *set, struct sbrec_chassis *chassis,
         if (uuid_equals(&chassis->header_.uuid, &node->chassis_uuid)
             && node->queue_id == queue_id) {
             hmap_remove(set, &node->key_node);
+            free(node);
             break;
         }
     }
@@ -3733,7 +3736,7 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
 
                 ds_clear(&actions);
                 ds_put_format(&actions,
-                        "nd_na { "
+                        "%s { "
                         "eth.src = %s; "
                         "ip6.src = %s; "
                         "nd.target = %s; "
@@ -3742,6 +3745,8 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
                         "flags.loopback = 1; "
                         "output; "
                         "};",
+                        !strcmp(op->nbsp->type, "router") ?
+                            "nd_na_router" : "nd_na",
                         op->lsp_addrs[i].ea_s,
                         op->lsp_addrs[i].ipv6_addrs[j].addr_s,
                         op->lsp_addrs[i].ipv6_addrs[j].addr_s,
@@ -4442,8 +4447,7 @@ add_router_lb_flow(struct hmap *lflows, struct ovn_datapath *od,
     free(new_match);
     free(est_match);
 
-    if (!od->l3dgw_port || !od->l3redirect_port || !backend_ips
-            || addr_family != AF_INET) {
+    if (!od->l3dgw_port || !od->l3redirect_port || !backend_ips) {
         return;
     }
 
@@ -4452,7 +4456,11 @@ add_router_lb_flow(struct hmap *lflows, struct ovn_datapath *od,
      * router has a gateway router port associated.
      */
     struct ds undnat_match = DS_EMPTY_INITIALIZER;
-    ds_put_cstr(&undnat_match, "ip4 && (");
+    if (addr_family == AF_INET) {
+        ds_put_cstr(&undnat_match, "ip4 && (");
+    } else {
+        ds_put_cstr(&undnat_match, "ip6 && (");
+    }
     char *start, *next, *ip_str;
     start = next = xstrdup(backend_ips);
     ip_str = strsep(&next, ",");
@@ -4460,14 +4468,18 @@ add_router_lb_flow(struct hmap *lflows, struct ovn_datapath *od,
     while (ip_str && ip_str[0]) {
         char *ip_address = NULL;
         uint16_t port = 0;
-        int addr_family;
+        int addr_family_;
         ip_address_and_port_from_lb_key(ip_str, &ip_address, &port,
-                                        &addr_family);
+                                        &addr_family_);
         if (!ip_address) {
             break;
         }
 
-        ds_put_format(&undnat_match, "(ip4.src == %s", ip_address);
+        if (addr_family_ == AF_INET) {
+            ds_put_format(&undnat_match, "(ip4.src == %s", ip_address);
+        } else {
+            ds_put_format(&undnat_match, "(ip6.src == %s", ip_address);
+        }
         free(ip_address);
         if (port) {
             ds_put_format(&undnat_match, " && %s.src == %d) || ",
@@ -4726,8 +4738,12 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
         for (int i = 0; i < op->lrp_networks.n_ipv4_addrs; i++) {
             ds_clear(&match);
             ds_put_format(&match,
-                          "inport == %s && arp.tpa == %s && arp.op == 1",
-                          op->json_key, op->lrp_networks.ipv4_addrs[i].addr_s);
+                          "inport == %s && arp.spa == %s/%u && arp.tpa == %s"
+                          " && arp.op == 1",
+                          op->json_key,
+                          op->lrp_networks.ipv4_addrs[i].network_s,
+                          op->lrp_networks.ipv4_addrs[i].plen,
+                          op->lrp_networks.ipv4_addrs[i].addr_s);
             if (op->od->l3dgw_port && op == op->od->l3dgw_port
                 && op->od->l3redirect_port) {
                 /* Traffic with eth.src = l3dgw_port->lrp_networks.ea_s
@@ -4741,6 +4757,7 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
 
             ds_clear(&actions);
             ds_put_format(&actions,
+                "put_arp(inport, arp.spa, arp.sha); "
                 "eth.dst = eth.src; "
                 "eth.src = %s; "
                 "arp.op = 2; /* ARP reply */ "
@@ -4757,6 +4774,27 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                 op->json_key);
             ovn_lflow_add(lflows, op->od, S_ROUTER_IN_IP_INPUT, 90,
                           ds_cstr(&match), ds_cstr(&actions));
+        }
+
+        /* Learn from ARP requests that were not directed at us. A typical
+         * use case is GARP request handling.  (A priority-90 flow will
+         * respond to request to us and learn the sender's mac address.) */
+        for (int i = 0; i < op->lrp_networks.n_ipv4_addrs; i++) {
+            ds_clear(&match);
+            ds_put_format(&match,
+                          "inport == %s && arp.spa == %s/%u && arp.op == 1",
+                          op->json_key,
+                          op->lrp_networks.ipv4_addrs[i].network_s,
+                          op->lrp_networks.ipv4_addrs[i].plen);
+            if (op->od->l3dgw_port && op == op->od->l3dgw_port
+                && op->od->l3redirect_port) {
+                ds_put_format(&match, " && is_chassis_resident(%s)",
+                              op->od->l3redirect_port->json_key);
+            }
+            ovn_lflow_add(lflows, op->od, S_ROUTER_IN_IP_INPUT, 80,
+                          ds_cstr(&match),
+                          "put_arp(inport, arp.spa, arp.sha);");
+
         }
 
         /* A set to hold all load-balancer vips that need ARP responses. */
@@ -5600,13 +5638,10 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                 continue;
             }
 
-            /* Add the prefix option if the address mode is slaac or
-             * dhcpv6_stateless. */
-            if (strcmp(address_mode, "dhcpv6_stateful")) {
-                ds_put_format(&actions, ", prefix = %s/%u",
-                              op->lrp_networks.ipv6_addrs[i].network_s,
-                              op->lrp_networks.ipv6_addrs[i].plen);
-            }
+            ds_put_format(&actions, ", prefix = %s/%u",
+                          op->lrp_networks.ipv6_addrs[i].network_s,
+                          op->lrp_networks.ipv6_addrs[i].plen);
+
             add_rs_response_flow = true;
         }
 
@@ -6352,7 +6387,8 @@ static struct gen_opts_map supported_dhcp_opts[] = {
     DHCP_OPT_MTU,
     DHCP_OPT_LEASE_TIME,
     DHCP_OPT_T1,
-    DHCP_OPT_T2
+    DHCP_OPT_T2,
+    DHCP_OPT_WPAD,
 };
 
 static struct gen_opts_map supported_dhcpv6_opts[] = {
@@ -6664,6 +6700,7 @@ parse_options(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
     static const struct option long_options[] = {
         {"ovnsb-db", required_argument, NULL, 'd'},
         {"ovnnb-db", required_argument, NULL, 'D'},
+        {"unixctl", required_argument, NULL, 'u'},
         {"help", no_argument, NULL, 'h'},
         {"options", no_argument, NULL, 'o'},
         {"version", no_argument, NULL, 'V'},
@@ -6693,6 +6730,10 @@ parse_options(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 
         case 'D':
             ovnnb_db = optarg;
+            break;
+
+        case 'u':
+            unixctl_path = optarg;
             break;
 
         case 'h':
@@ -6747,7 +6788,7 @@ main(int argc, char *argv[])
 
     daemonize_start(false);
 
-    retval = unixctl_server_create(NULL, &unixctl);
+    retval = unixctl_server_create(unixctl_path, &unixctl);
     if (retval) {
         exit(EXIT_FAILURE);
     }

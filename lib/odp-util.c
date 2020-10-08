@@ -2021,14 +2021,14 @@ parse_odp_push_nsh_action(const char *s, struct ofpbuf *actions)
             struct ofpbuf b;
             char buf[512];
             size_t mdlen, padding;
-            if (ovs_scan_len(s, &n, "md2=0x%511[0-9a-fA-F]", buf)) {
-                ofpbuf_use_stub(&b, metadata,
-                                NSH_CTX_HDRS_MAX_LEN);
+            if (ovs_scan_len(s, &n, "md2=0x%511[0-9a-fA-F]", buf)
+                && n/2 <= sizeof metadata) {
+                ofpbuf_use_stub(&b, metadata, sizeof metadata);
                 ofpbuf_put_hex(&b, buf, &mdlen);
                 /* Pad metadata to 4 bytes. */
                 padding = PAD_SIZE(mdlen, 4);
                 if (padding > 0) {
-                    ofpbuf_push_zeros(&b, padding);
+                    ofpbuf_put_zeros(&b, padding);
                 }
                 md_size = mdlen + padding;
                 ofpbuf_uninit(&b);
@@ -2068,6 +2068,10 @@ parse_action_list(const char *s, const struct simap *port_names,
             return retval;
         }
         n += retval;
+    }
+
+    if (actions->size > UINT16_MAX) {
+        return -EFBIG;
     }
 
     return n;
@@ -2159,13 +2163,14 @@ parse_odp_action(const char *s, const struct simap *port_names,
                 key->nla_len += size;
                 ofpbuf_put(actions, mask + 1, size);
 
-                /* Add new padding as needed */
-                ofpbuf_put_zeros(actions, NLA_ALIGN(key->nla_len) -
-                                          key->nla_len);
-
                 /* 'actions' may have been reallocated by ofpbuf_put(). */
                 nested = ofpbuf_at_assert(actions, start_ofs, sizeof *nested);
                 nested->nla_type = OVS_ACTION_ATTR_SET_MASKED;
+
+                key = nested + 1;
+                /* Add new padding as needed */
+                ofpbuf_put_zeros(actions, NLA_ALIGN(key->nla_len) -
+                                          key->nla_len);
             }
         }
         ofpbuf_uninit(&maskbuf);
@@ -2473,6 +2478,8 @@ odp_nsh_hdr_from_attr(const struct nlattr *attr,
     size_t mdlen = 0;
     bool has_md1 = false;
     bool has_md2 = false;
+
+    memset(nsh_hdr, 0, size);
 
     NL_NESTED_FOR_EACH (a, left, attr) {
         uint16_t type = nl_attr_type(a);
@@ -5131,13 +5138,6 @@ static int
 parse_odp_key_mask_attr(const char *s, const struct simap *port_names,
                         struct ofpbuf *key, struct ofpbuf *mask)
 {
-    /* Skip UFID. */
-    ovs_u128 ufid;
-    int ufid_len = odp_ufid_from_string(s, &ufid);
-    if (ufid_len) {
-        return ufid_len;
-    }
-
     SCAN_SINGLE("skb_priority(", uint32_t, u32, OVS_KEY_ATTR_PRIORITY);
     SCAN_SINGLE("skb_mark(", uint32_t, u32, OVS_KEY_ATTR_SKB_MARK);
     SCAN_SINGLE_FULLY_MASKED("recirc_id(", uint32_t, u32,
@@ -5306,6 +5306,10 @@ parse_odp_key_mask_attr(const char *s, const struct simap *port_names,
             if (retval < 0) {
                 return retval;
             }
+
+            if (nl_attr_oversized(key->size - encap - NLA_HDRLEN)) {
+                return -E2BIG;
+            }
             s += retval;
         }
         s++;
@@ -5346,6 +5350,17 @@ odp_flow_from_string(const char *s, const struct simap *port_names,
         s += strspn(s, delimiters);
         if (!*s) {
             return 0;
+        }
+
+        /* Skip UFID. */
+        ovs_u128 ufid;
+        retval = odp_ufid_from_string(s, &ufid);
+        if (retval < 0) {
+            key->size = old_size;
+            return -retval;
+        } else if (retval > 0) {
+            s += retval;
+            s += s[0] == ' ' ? 1 : 0;
         }
 
         retval = parse_odp_key_mask_attr(s, port_names, key, mask);
@@ -5441,26 +5456,28 @@ odp_flow_key_from_flow__(const struct odp_flow_key_parms *parms,
     if (flow->ct_nw_proto) {
         if (parms->support.ct_orig_tuple
             && flow->dl_type == htons(ETH_TYPE_IP)) {
-            struct ovs_key_ct_tuple_ipv4 ct = {
-                data->ct_nw_src,
-                data->ct_nw_dst,
-                data->ct_tp_src,
-                data->ct_tp_dst,
-                data->ct_nw_proto,
-            };
-            nl_msg_put_unspec(buf, OVS_KEY_ATTR_CT_ORIG_TUPLE_IPV4, &ct,
-                              sizeof ct);
+            struct ovs_key_ct_tuple_ipv4 *ct;
+
+            /* 'struct ovs_key_ct_tuple_ipv4' has padding, clear it. */
+            ct = nl_msg_put_unspec_zero(buf, OVS_KEY_ATTR_CT_ORIG_TUPLE_IPV4,
+                                        sizeof *ct);
+            ct->ipv4_src = data->ct_nw_src;
+            ct->ipv4_dst = data->ct_nw_dst;
+            ct->src_port = data->ct_tp_src;
+            ct->dst_port = data->ct_tp_dst;
+            ct->ipv4_proto = data->ct_nw_proto;
         } else if (parms->support.ct_orig_tuple6
                    && flow->dl_type == htons(ETH_TYPE_IPV6)) {
-            struct ovs_key_ct_tuple_ipv6 ct = {
-                data->ct_ipv6_src,
-                data->ct_ipv6_dst,
-                data->ct_tp_src,
-                data->ct_tp_dst,
-                data->ct_nw_proto,
-            };
-            nl_msg_put_unspec(buf, OVS_KEY_ATTR_CT_ORIG_TUPLE_IPV6, &ct,
-                              sizeof ct);
+            struct ovs_key_ct_tuple_ipv6 *ct;
+
+            /* 'struct ovs_key_ct_tuple_ipv6' has padding, clear it. */
+            ct = nl_msg_put_unspec_zero(buf, OVS_KEY_ATTR_CT_ORIG_TUPLE_IPV6,
+                                        sizeof *ct);
+            ct->ipv6_src = data->ct_ipv6_src;
+            ct->ipv6_dst = data->ct_ipv6_dst;
+            ct->src_port = data->ct_tp_src;
+            ct->dst_port = data->ct_tp_dst;
+            ct->ipv6_proto = data->ct_nw_proto;
         }
     }
     if (parms->support.recirc) {
@@ -7024,6 +7041,7 @@ commit_set_ipv6_action(const struct flow *flow, struct flow *base_flow,
     get_ipv6_key(&wc->masks, &mask, true);
     mask.ipv6_proto = 0;        /* Not writeable. */
     mask.ipv6_frag = 0;         /* Not writable. */
+    mask.ipv6_label &= htonl(IPV6_LABEL_MASK); /* Not writable. */
 
     if (flow_tnl_dst_is_set(&base_flow->tunnel) &&
         ((base_flow->nw_tos ^ flow->nw_tos) & IP_ECN_MASK) == 0) {

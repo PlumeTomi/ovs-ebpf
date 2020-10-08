@@ -656,6 +656,20 @@ AT_CHECK([ovs-ofctl -O OpenFlow15 -vwarn insert-buckets br0 group_id=1234,comman
 AT_CHECK([ovs-ofctl -O OpenFlow11 -vwarn insert-buckets br0 group_id=1234,command_bucket_id=first,bucket=bucket_id:0,actions=output:0,bucket=bucket_id:1,actions=output:1], [1], [],
   [ovs-ofctl: insert-bucket needs OpenFlow 1.5 or later ('-O OpenFlow15')
 ])
+
+# Verify insert-buckets command to insert bucket with weight value for select group.
+AT_CHECK([ovs-ofctl -O OpenFlow15 --strict del-groups br0 group_id=1234])
+AT_DATA([groups.txt], [dnl
+group_id=1234,type=select,selection_method=hash,bucket=bucket_id=1,weight:100,output:11
+])
+AT_CHECK([ovs-ofctl -O OpenFlow15 -vwarn add-groups br0 groups.txt])
+AT_CHECK([ovs-ofctl -O OpenFlow15 insert-buckets br0 group_id=1234,command_bucket_id=last,bucket=bucket_id=2,weight=100,actions=output:11])
+AT_CHECK([ovs-ofctl -O OpenFlow15 -vwarn dump-groups br0], [0], [stdout])
+AT_CHECK([strip_xids < stdout], [0], [dnl
+OFPST_GROUP_DESC reply (OF1.5):
+ group_id=1234,type=select,selection_method=hash,bucket=bucket_id:1,weight:100,actions=output:11,bucket=bucket_id:2,weight:100,actions=output:11
+])
+
 OVS_VSWITCHD_STOP
 AT_CLEANUP
 
@@ -1179,6 +1193,22 @@ AT_CHECK([ovs-ofctl -O OpenFlow15 -vwarn dump-group-stats br0], [0], [stdout])
 AT_CHECK([strip_xids < stdout | sed 's/duration=[[0-9.]]*s/duration=?s/' | sort], [0], [dnl
  group_id=1234,duration=?s,ref_count=1,packet_count=0,byte_count=0,bucket0:packet_count=0,byte_count=0
  group_id=1235,duration=?s,ref_count=0,packet_count=0,byte_count=0,bucket0:packet_count=0,byte_count=0
+OFPST_GROUP reply (OF1.5):
+])
+OVS_VSWITCHD_STOP
+AT_CLEANUP
+
+dnl This is used to find that the bucket counter is not updated.
+AT_SETUP([ofproto - group stats after insert a new bucket (OpenFlow 1.5)])
+OVS_VSWITCHD_START
+AT_DATA([groups.txt], [dnl
+group_id=1234,type=select,selection_method=hash bucket=bucket_id=1,weight:100,actions=output:10
+])
+AT_CHECK([ovs-ofctl -O OpenFlow15 -vwarn add-groups br0 groups.txt])
+AT_CHECK([ovs-ofctl -O OpenFlow15 -vwarn insert-buckets br0 'group_id=1234, command_bucket_id=last, bucket=bucket_id=2,weight:100,actions=output:10'])
+AT_CHECK([ovs-ofctl -O OpenFlow15 -vwarn dump-group-stats br0 group_id=1234], [0], [stdout])
+AT_CHECK([strip_xids < stdout | sed 's/duration=[[0-9.]]*s/duration=?s/' | sort], [0], [dnl
+ group_id=1234,duration=?s,ref_count=0,packet_count=0,byte_count=0,bucket0:packet_count=0,byte_count=0,bucket1:packet_count=0,byte_count=0
 OFPST_GROUP reply (OF1.5):
 ])
 OVS_VSWITCHD_STOP

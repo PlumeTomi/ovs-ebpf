@@ -1524,6 +1524,10 @@ ofconn_receives_async_msg(const struct ofconn *ofconn,
     ovs_assert(reason < 32);
     ovs_assert((unsigned int) type < OAM_N_TYPES);
 
+    if (!rconn_is_connected(ofconn->rconn)) {
+        return false;
+    }
+
     /* Keep the following code in sync with the documentation in the
      * "Asynchronous Messages" section in 'topics/design' */
 
@@ -1951,7 +1955,7 @@ connmgr_flushed(struct connmgr *mgr)
         struct ofpbuf ofpacts;
         struct match match;
 
-        ofpbuf_init(&ofpacts, OFPACT_OUTPUT_SIZE);
+        ofpbuf_init(&ofpacts, sizeof(struct ofpact_output));
         ofpact_put_OUTPUT(&ofpacts)->port = OFPP_NORMAL;
 
         match_init_catchall(&match);

@@ -12,7 +12,8 @@ dnf -y install autoconf automake openssl-devel libtool \
                python-twisted python-zope-interface \
                desktop-file-utils groff graphviz rpmdevtools nc curl \
                wget python-six pyftpdlib checkpolicy selinux-policy-devel \
-               libcap-ng-devel kernel-devel-`uname -r` ethtool python-tftpy
+               libcap-ng-devel kernel-devel-`uname -r` ethtool python-tftpy \
+               lftp
 echo "search extra update built-in" >/etc/depmod.d/search_path.conf
 SCRIPT
 
@@ -20,15 +21,16 @@ $bootstrap_debian = <<SCRIPT
 aptitude -y update
 aptitude -y upgrade
 aptitude -y install -R \
-		build-essential dpkg-dev lintian devscripts fakeroot \
-		debhelper dh-autoreconf uuid-runtime \
-		autoconf automake libtool \
-		python-all python-twisted-core python-twisted-conch \
-		xdg-utils groff graphviz netcat curl \
-		wget python-six ethtool \
-		libcap-ng-dev libssl-dev python-dev openssl \
-		python-pyftpdlib python-flake8 python-tftpy \
-		linux-headers-`uname -r`
+                build-essential dpkg-dev lintian devscripts fakeroot \
+                debhelper dh-autoreconf uuid-runtime \
+                autoconf automake libtool \
+                python-all python-twisted-core python-twisted-conch \
+                xdg-utils groff graphviz netcat curl \
+                wget python-six ethtool \
+                libcap-ng-dev libssl-dev python-dev openssl \
+                python-pyftpdlib python-flake8 python-tftpy \
+                linux-headers-`uname -r` \
+                lftp
 SCRIPT
 
 $bootstrap_centos = <<SCRIPT
@@ -37,7 +39,8 @@ yum -y install autoconf automake openssl-devel libtool \
                python-twisted-core python-zope-interface \
                desktop-file-utils groff graphviz rpmdevtools nc curl \
                wget python-six pyftpdlib checkpolicy selinux-policy-devel \
-               libcap-ng-devel kernel-devel-`uname -r` ethtool net-tools
+               libcap-ng-devel kernel-devel-`uname -r` ethtool net-tools \
+               lftp
 SCRIPT
 
 $configure_ovs = <<SCRIPT
