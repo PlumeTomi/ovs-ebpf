@@ -36,7 +36,9 @@
 
 /* We don't rely on specific versions of the kernel; however libbpf requires
  * this to be both specified and non-zero. */
-static const __maybe_unused __section("version") uint32_t version = 0x1;
+/* Defining a variable with the name 'version' gives a compiler error:
+ * invalid symbol redefinition. Commenting it out seems to work just fine. */
+// static const __maybe_unused __section("version") uint32_t version = 0x1;
 
 static inline void __maybe_unused
 bpf_debug(struct __sk_buff *skb, enum ovs_dbg_subtype subtype, int error)
@@ -64,7 +66,7 @@ bpf_debug(struct __sk_buff *skb, enum ovs_dbg_subtype subtype, int error)
  * BPF program: tail-35
  */
 __section_tail(UPCALL_CALL)
-static inline int process_upcall(struct __sk_buff *skb)
+int process_upcall(struct __sk_buff *skb)
 {
     struct bpf_upcall md = {
         .type = OVS_UPCALL_MISS,
@@ -114,7 +116,7 @@ static inline int process_upcall(struct __sk_buff *skb)
  * This is the ENTRY POINT for packet seen at ingress queue
  */
 __section("ingress")
-static int to_stack(struct __sk_buff *skb)
+int to_stack(struct __sk_buff *skb)
 {
     printt("\n\ningress from %d (%d)\n", skb->ingress_ifindex, skb->ifindex);
 
@@ -129,7 +131,7 @@ static int to_stack(struct __sk_buff *skb)
  * This is the ENTRY POINT for packet seen at egress queue
  */
 __section("egress")
-static int from_stack(struct __sk_buff *skb)
+int from_stack(struct __sk_buff *skb)
 {
     printt("\n\negress from %d (%d)\n", skb->ingress_ifindex, skb->ifindex);
 
@@ -144,7 +146,7 @@ static int from_stack(struct __sk_buff *skb)
  * This is the ENTRY POINT for downcall packet
  */
 __section("downcall")
-static int execute(struct __sk_buff *skb)
+int execute(struct __sk_buff *skb)
 {
     struct bpf_downcall md;
     u32 ebpf_zero = 0;
@@ -170,6 +172,7 @@ static int execute(struct __sk_buff *skb)
             printt("get valid action_batch\n");
             skb->cb[OVS_CB_DOWNCALL_EXE] = 1;
             bpf_tail_call(skb, &tailcalls, action_batch->actions[0].type);
+            printt("downcall action tail call failed\n");
         } else {
             printt("get null action_batch\n");
         }

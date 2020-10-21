@@ -171,7 +171,7 @@ ovs_lookup_flow(struct ebpf_headers_t *headers,
 }
 
 __section_tail(MATCH_ACTION_CALL)
-static int lookup(struct __sk_buff* skb OVS_UNUSED)
+int lookup(struct __sk_buff* skb OVS_UNUSED)
 {
     struct bpf_action_batch *action_batch;
     struct ebpf_headers_t *headers;
@@ -196,6 +196,7 @@ static int lookup(struct __sk_buff* skb OVS_UNUSED)
         bpf_tail_call(skb, &tailcalls, UPCALL_CALL);
 
         /* OVS_NOT_REACHED */
+        printt("tail call UPCALL_CALL failed\n");
         return TC_ACT_OK;
     } else {
         printt("action found! stay in BPF\n");

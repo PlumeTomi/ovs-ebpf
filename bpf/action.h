@@ -208,7 +208,7 @@ finish:
  * BPF program: tail-0
  */
 __section_tail(OVS_ACTION_ATTR_UNSPEC)
-static int tail_action_unspec(struct __sk_buff *skb)
+int tail_action_unspec(struct __sk_buff *skb)
 {
     int index OVS_UNUSED = ovs_cb_get_action_index(skb);
 
@@ -227,7 +227,7 @@ static int tail_action_unspec(struct __sk_buff *skb)
  * BPF program: tail-1
  */
 __section_tail(OVS_ACTION_ATTR_OUTPUT)
-static int tail_action_output(struct __sk_buff *skb)
+int tail_action_output(struct __sk_buff *skb)
 {
     int ret __attribute__((__unused__));
     struct bpf_action *action;
@@ -258,7 +258,7 @@ static int tail_action_output(struct __sk_buff *skb)
  * BPF program: tail-2
  */
 __section_tail(OVS_ACTION_ATTR_USERSPACE)
-static int tail_action_userspace(struct __sk_buff *skb)
+int tail_action_userspace(struct __sk_buff *skb)
 {
     struct bpf_action *action;
     struct bpf_action_batch *batch;
@@ -308,7 +308,7 @@ static int tail_action_userspace(struct __sk_buff *skb)
  * BPF program: tail-3
  */
 __section_tail(OVS_ACTION_ATTR_SET)
-static int tail_action_tunnel_set(struct __sk_buff *skb)
+int tail_action_tunnel_set(struct __sk_buff *skb)
 {
     struct bpf_tunnel_key key;
     int ret;
@@ -404,7 +404,7 @@ static int tail_action_tunnel_set(struct __sk_buff *skb)
  * BPF program: tail-4
  */
 __section_tail(OVS_ACTION_ATTR_PUSH_VLAN)
-static int tail_action_push_vlan(struct __sk_buff *skb)
+int tail_action_push_vlan(struct __sk_buff *skb)
 {
     struct bpf_action *action;
     struct bpf_action_batch *batch;
@@ -429,7 +429,7 @@ static int tail_action_push_vlan(struct __sk_buff *skb)
  * BPF program: tail-5
  */
 __section_tail(OVS_ACTION_ATTR_POP_VLAN)
-static int tail_action_pop_vlan(struct __sk_buff *skb)
+int tail_action_pop_vlan(struct __sk_buff *skb)
 {
     struct bpf_action *action;
     struct bpf_action_batch *batch;
@@ -450,7 +450,7 @@ static int tail_action_pop_vlan(struct __sk_buff *skb)
  * BPF program: tail-6
  */
 __section_tail(OVS_ACTION_ATTR_SAMPLE)
-static int tail_action_sample(struct __sk_buff *skb OVS_UNUSED)
+int tail_action_sample(struct __sk_buff *skb OVS_UNUSED)
 {
     printt("ERR: Sample action not implemented,\
             do you want to do it? \n");
@@ -463,7 +463,7 @@ static int tail_action_sample(struct __sk_buff *skb OVS_UNUSED)
  * BPF program: tail-7
  */
 __section_tail(OVS_ACTION_ATTR_RECIRC)
-static int tail_action_recirc(struct __sk_buff *skb)
+int tail_action_recirc(struct __sk_buff *skb)
 {
     u32 recirc_id = 0;
     struct bpf_action *action;
@@ -496,6 +496,7 @@ static int tail_action_recirc(struct __sk_buff *skb)
 
     /* FIXME: recirc should not call this. */
     bpf_tail_call(skb, &tailcalls, MATCH_ACTION_CALL);
+    printt("tail call MATCH_ACTION_CALL failed\n");
     return TC_ACT_SHOT;
 }
 
@@ -504,7 +505,7 @@ static int tail_action_recirc(struct __sk_buff *skb)
  * BPF program: tail-8
  */
 __section_tail(OVS_ACTION_ATTR_HASH)
-static int tail_action_hash(struct __sk_buff *skb)
+int tail_action_hash(struct __sk_buff *skb)
 {
     u32 hash = 0;
     int index = 0;
@@ -538,7 +539,7 @@ static int tail_action_hash(struct __sk_buff *skb)
  * BPF program: tail-9
  */
 __section_tail(OVS_ACTION_ATTR_PUSH_MPLS)
-static int tail_action_mpls_push(struct __sk_buff *skb OVS_UNUSED)
+int tail_action_mpls_push(struct __sk_buff *skb OVS_UNUSED)
 {
     printt("ERR: Push MPLS action not implemented,\
             do you want to do it? \n");
@@ -551,7 +552,7 @@ static int tail_action_mpls_push(struct __sk_buff *skb OVS_UNUSED)
  * BPF program: tail-10
  */
 __section_tail(OVS_ACTION_ATTR_POP_MPLS)
-static int tail_action_mpls_pop(struct __sk_buff *skb OVS_UNUSED)
+int tail_action_mpls_pop(struct __sk_buff *skb OVS_UNUSED)
 {
     printt("ERR: Pop MPLS action not implemented,\
             do you want to do it? \n");
@@ -567,7 +568,7 @@ static int tail_action_mpls_pop(struct __sk_buff *skb OVS_UNUSED)
  *       more tail call.
  */
 __section_tail(OVS_ACTION_ATTR_SET_MASKED)
-static int tail_action_set_masked(struct __sk_buff *skb)
+int tail_action_set_masked(struct __sk_buff *skb)
 {
     struct bpf_action *action;
     struct bpf_action_batch *batch;
@@ -683,7 +684,7 @@ static int tail_action_set_masked(struct __sk_buff *skb)
  * BPF program: tail-12
  */
 __section_tail(OVS_ACTION_ATTR_CT)
-static int tail_action_ct(struct __sk_buff *skb OVS_UNUSED)
+int tail_action_ct(struct __sk_buff *skb OVS_UNUSED)
 {
     printt("ERR: CT (connection tracking) not implemented,\
             do you want to do it? \n");
@@ -695,7 +696,7 @@ static int tail_action_ct(struct __sk_buff *skb OVS_UNUSED)
  * BPF program: tail-13
  */
 __section_tail(OVS_ACTION_ATTR_TRUNC)
-static int tail_action_trunc(struct __sk_buff *skb)
+int tail_action_trunc(struct __sk_buff *skb)
 {
     struct bpf_action *action;
     struct bpf_action_batch *batch;

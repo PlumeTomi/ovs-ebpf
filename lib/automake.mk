@@ -451,6 +451,7 @@ lib/dhparams.c: lib/dh1024.pem lib/dh2048.pem lib/dh4096.pem
 	 openssl dhparam -C -in $(srcdir)/lib/dh2048.pem -noout &&	\
 	 openssl dhparam -C -in $(srcdir)/lib/dh4096.pem -noout)	\
 	| sed 's/\(get_dh[0-9]*\)()/\1(void)/' > lib/dhparams.c.tmp &&  \
+	  sed -i '/\(get_dh[0-9]*\)(void)/s/^static//' lib/dhparams.c.tmp && \
 	mv lib/dhparams.c.tmp lib/dhparams.c
 else
 lib_libopenvswitch_la_SOURCES += lib/stream-nossl.c

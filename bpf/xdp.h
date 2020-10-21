@@ -19,7 +19,7 @@
 #include "helpers.h"
 
 __section("xdp")
-static int xdp_ingress(struct xdp_md *ctx OVS_UNUSED)
+int xdp_ingress(struct xdp_md *ctx OVS_UNUSED)
 {
     /* TODO: see p4c-xdp project */
 #ifdef BPF_ENABLE_IPV6
@@ -45,7 +45,7 @@ static int xdp_ingress(struct xdp_md *ctx OVS_UNUSED)
 }
 
 __section("af_xdp")
-static int af_xdp_ingress(struct xdp_md *ctx OVS_UNUSED)
+int af_xdp_ingress(struct xdp_md *ctx OVS_UNUSED)
 {
     /* TODO: see xdpsock_kern.c ans xdpsock_user.c */
     return XDP_PASS;

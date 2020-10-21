@@ -36,7 +36,7 @@
 #include "openvswitch/dynamic-string.h"
 #include "openvswitch/vlog.h"
 
-#define BPF_FS_PATH "/sys/fs/bpf/ovs/"
+#define BPF_FS_PATH "/sys/fs/bpf/ovs"
 static const char *ovs_bpf_path = BPF_FS_PATH;
 
 #define MAX_BPF_PROG_ARRAY 64 //FIXME
@@ -190,10 +190,10 @@ bpf_get(struct bpf_state *state, bool verbose)
         const char *path;
     } objs[] = {
         /* BPF Programs */
-        {&state->ingress.fd, "ingress/0"},
-        {&state->egress.fd, "egress/0"},
-        {&state->downcall.fd, "downcall/0"},
-        {&state->xdp.fd, "xdp/0"},
+        {&state->ingress.fd, "ingress"},
+        {&state->egress.fd, "egress"},
+        {&state->downcall.fd, "downcall"},
+        {&state->xdp.fd, "xdp"},
         /* BPF Maps */
         {&state->upcalls.fd, "upcalls"},
         {&state->flow_table.fd, "flow_table"},
@@ -223,6 +223,7 @@ bpf_get(struct bpf_state *state, bool verbose)
             continue;
         } else {
             error = errno;
+            VLOG_ERR("Error loading BPF object %s, reason: %s\n", buf, ovs_strerror(error));
             break;
         }
     }
@@ -236,7 +237,7 @@ bpf_get(struct bpf_state *state, bool verbose)
 
         state->tailarray[k].fd = 0;
 
-        snprintf(buf, ARRAY_SIZE(buf), "%s/tail-%d/0", ovs_bpf_path, k);
+        snprintf(buf, ARRAY_SIZE(buf), "%s/tail-%d", ovs_bpf_path, k);
         if (stat(buf, &s)) {
             continue;
         }

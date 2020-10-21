@@ -54,7 +54,7 @@ static bool ipv6_has_ext(u8 nw_proto) {
 }
 
 __section_tail(PARSER_CALL)
-static int ovs_parser(struct __sk_buff* skb) {
+int ovs_parser(struct __sk_buff* skb) {
     void *data = (void *)(long)skb->data;
     struct ebpf_headers_t hdrs = {};
     struct ebpf_metadata_t metadata = {};
@@ -292,7 +292,11 @@ parse_metadata:
         metadata.md.in_port = skb->ingress_ifindex;
     }
     if (!skb->cb[OVS_CB_INGRESS]) {
-        metadata.md.in_port = skb->ifindex;
+        /* It seems like a compiler optimization (or so I've read online)
+         * produces machine code the the verifier cannot verify (dereference
+         * of modified ctx ptr R2 off=36 disallowed... r2 +0 in machine code).
+         * This modulo stops the optimization from happening. */
+        metadata.md.in_port = skb->ifindex % 1000000;
     }
     metadata.md.pkt_mark = skb->mark;
 
