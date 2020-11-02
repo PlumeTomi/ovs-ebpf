@@ -171,7 +171,7 @@ int execute(struct __sk_buff *skb)
         if (action_batch) {
             printt("get valid action_batch\n");
             skb->cb[OVS_CB_DOWNCALL_EXE] = 1;
-            bpf_tail_call(skb, &tailcalls, action_batch->actions[0].type);
+            bpf_tail_call(skb, &tailcalls, ACTION_LOOP);
             printt("downcall action tail call failed\n");
         } else {
             printt("get null action_batch\n");

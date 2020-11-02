@@ -44,12 +44,6 @@ ovs_cb_is_initial_parse(struct __sk_buff *skb) {
     return index == 0;
 }
 
-static uint32_t
-ovs_cb_get_action_index(struct __sk_buff *skb)
-{
-    return skb->cb[OVS_CB_ACT_IDX];
-}
-
 static uint32_t OVS_UNUSED
 ovs_cb_get_ifindex(struct __sk_buff *skb)
 {

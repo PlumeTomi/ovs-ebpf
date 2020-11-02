@@ -17,6 +17,7 @@
 #define MATCH_ACTION_CALL       33
 #define DEPARSER_CALL           34
 #define UPCALL_CALL             35
+#define ACTION_LOOP             36
 
 #ifndef TC_ACT_OK
 #define TC_ACT_OK               0

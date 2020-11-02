@@ -219,7 +219,7 @@ int lookup(struct __sk_buff* skb OVS_UNUSED)
     }
 
     /* the subsequent actions will be tail called. */
-    ovs_execute_actions(skb, &action_batch->actions[0]);
+    bpf_tail_call(skb, &tailcalls, ACTION_LOOP);
 
     printt("ERROR: tail call fails\n");
 
