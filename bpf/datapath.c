@@ -118,12 +118,26 @@ int process_upcall(struct __sk_buff *skb)
 __section("ingress")
 int to_stack(struct __sk_buff *skb)
 {
-    printt("\n\ningress from %d (%d)\n", skb->ingress_ifindex, skb->ifindex);
+    printt("\n\nFast ingress from %d (%d)\n", skb->ingress_ifindex, skb->ifindex);
 
     ovs_cb_init(skb, true);
-    bpf_tail_call(skb, &tailcalls, PARSER_CALL);
+    unsigned int ifc;
+    int direction = ovs_parser(skb, &ifc);
+    if (direction == 0) {
+        // packet from outside, put into mgmt0 (ifc number 14)
+        int flags, port;
 
-    printt("ERR: tail call fail in ingress\n");
+        // output action port = 14 ingress? 1
+        port = ifc + 1;
+        flags = 1;
+        printt("output action port = %d ingress? %d\n", port, flags);
+
+        bpf_clone_redirect(skb, port, flags);
+        return TC_ACT_STOLEN;
+    } else if (direction == 1) {
+        printt("packet from inside on ingress.... WTF\n");
+    }
+
     return TC_ACT_SHOT;
 }
 
@@ -133,12 +147,26 @@ int to_stack(struct __sk_buff *skb)
 __section("egress")
 int from_stack(struct __sk_buff *skb)
 {
-    printt("\n\negress from %d (%d)\n", skb->ingress_ifindex, skb->ifindex);
+    printt("\n\nFast egress from %d (%d)\n", skb->ingress_ifindex, skb->ifindex);
 
     ovs_cb_init(skb, false);
-    bpf_tail_call(skb, &tailcalls, PARSER_CALL);
+    unsigned int ifc;
+    int direction = ovs_parser(skb, &ifc);
+    if (direction == 1) {
+        // packet from outside, put into mgmt0 (ifc number 14)
+        int flags, port;
 
-    printt("ERR: tail call fail in egress\n");
+        // output action port = 13 ingress? 0
+        port = ifc - 1;
+        flags = 0;
+        printt("output action port = %d ingress? %d\n", port, flags);
+
+        bpf_clone_redirect(skb, port, flags);
+        return TC_ACT_STOLEN;
+    } else if (direction == 0) {
+        printt("packet from outside on egress.... WTF\n");
+    }
+
     return TC_ACT_SHOT;
 }
 

@@ -1,0 +1,25 @@
+Katere akseleracije vi uporabljate vse? Ker problemi, ki sem jih glikar opisal bi lohk mel isto SFE.
+
+XDP oz. eBPF z OpenSync:
+Vedno je težava, da je akseleracija handlana preko Linux conntracka (počasen, zato SFE obide conntrack, ampak sinhronizira z njim). Fora je da se hardwerska akseleracija na conntrack zanaša, ampak verjetno jo lahko vi sami krmilite?
+Dve opciji za uporabo XDP-ja z OpenSync:
+1. OVS implementiran v userspace z AF_XDP:
+    - rabiš XDP_REDIRECT (najbolš zerocopy) podporo na driverju
+    - paket pride direkt iz driverja do userspaca, conntrack se dela v userspacu, vse se dela v userspacu (rabiš gretap netdev implementacijo)
+    - Linux conntrack state se sinhronizira prek komand
+    - opcija je, da si narediš nek forwarding engine direktno v XDP (recimo gre tuneliranje lahko prek zerocopy + brez skb alokacij furaš čez najhitreje kar se da), state ohranjaš preko BPF MAP -- vprašanje, če je to toliko boljši performance kot samo userspace processing
+2. OVS implementiran v eBPF
+    - ni veliko boljši od navadnega, vse se dela v kernelu
+    - forwarding engine je še vedno opcija, je lažje za implementirat ker je vse že v eBPFju
+    - ne more sinhronizirat z Linux conntrackom...
+3. Glavni problem je to, da XDP ne koristi veliko: hočemo, da gredo paketi, ki pridejo do OVSja čez vsak interface posebej (da lahko delamo statistiko, konfigurabilnost, GRE tuneliranje, itd.), naslednji pa so itak akselerirani preko hardwera (kolko jih gre čez kernel, preden hardwerska akseleracija zagrab?)
+
+
+Flow cache:
+ - BPF MAP
+
+
+
+Vprasanja:
+- zakaj se sploh rabi softwersko akseleracijo, če obstaja hardwerska
+- kdaj se zgodi bridging, pred ip routingom ali po ip routingu?

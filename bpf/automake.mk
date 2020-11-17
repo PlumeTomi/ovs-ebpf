@@ -22,7 +22,7 @@ bpf_FILTER_FLAGS := $(filter-out -Wbool-compare -Wmissing-prototypes, $(AM_CFLAG
 bpf_FILTER_FLAGS2 := $(filter-out -Wduplicated-cond, $(bpf_FILTER_FLAGS))
 bpf_FILTER_FLAGS3 := $(filter-out --coverage, $(bpf_FILTER_FLAGS2))
 bpf_CFLAGS := $(bpf_FILTER_FLAGS3)
-bpf_CFLAGS += -D__NR_CPUS__=$(shell nproc) -O2 -Wall -Werror -target bpf
+bpf_CFLAGS += -D__NR_CPUS__=$(shell nproc) -O2 -Wall -target bpf
 bpf_CFLAGS += -I$(top_builddir)/include -I$(top_srcdir)/include
 bpf_CFLAGS += -Wno-error=pointer-arith  # Allow skb->data arithmetic
 bpf_CFLAGS += -I${IPROUTE2_SRC_PATH}/include/uapi/
